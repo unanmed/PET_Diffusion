@@ -12,6 +12,8 @@ from datetime import datetime
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import lr_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from model.model import PETUNet
+from model.loss import MSESSIMLoss
 
 EPOCHES = 300
 IMAGE_SIZE = 256
@@ -57,64 +59,6 @@ class TrainDataset(Dataset):
             'target_img': target_img,
         }
         return sample
-
-class PETUNet(nn.Module):
-    def __init__(self, features=[64, 128, 256, 512], in_channels=1, out_channels=1):
-        super(PETUNet, self).__init__()
-        
-        # 下采样部分 (in_channels 为 1)
-        self.downs = nn.ModuleList()
-        for feature in features:
-            self.downs.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, feature, kernel_size=3, stride=2, padding=1),
-                    nn.BatchNorm2d(feature),
-                    nn.ReLU()
-                )
-            )
-            in_channels = feature
-        
-        # 瓶颈层
-        self.bottleneck = nn.Sequential(
-            nn.Conv2d(features[-1], features[-1], kernel_size=3, padding=1),
-            nn.ReLU()
-        )
-        
-        # 上采样部分
-        self.ups = nn.ModuleList()
-        prev_feature = features[-1]
-        for feature in reversed(features):
-            self.ups.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(prev_feature + feature, feature, kernel_size=2, stride=2),
-                    nn.BatchNorm2d(feature),
-                    nn.ReLU()
-                )
-            )
-            prev_feature = feature
-        
-        # 最终输出单通道 (out_channels = 1)
-        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
-
-    def forward(self, x):
-        skips = []
-        
-        # 下采样
-        for down in self.downs:
-            x = down(x)
-            skips.append(x)
-        
-        x = self.bottleneck(x)
-        
-        # 上采样
-        for up in self.ups:
-            skip = skips.pop()
-            x = torch.cat([x, skip], dim=1)
-            x = up(x)
-        
-        # 最后输出 (保持单通道)
-        x = self.final_conv(x)
-        return x
     
 def parse_arguments():
     parser = argparse.ArgumentParser(description="training codes")
@@ -123,7 +67,7 @@ def parse_arguments():
     parser.add_argument("--target", type=str, default="../mat/CT_train", help="Target images.")
     parser.add_argument("--resume", dest='resume', action='store_true',  help="Resume training. ")
     parser.add_argument("--loss", type=str, default="L2", choices=["L1", "L2"], help="Choose which loss function to use. ")
-    parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate")
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     return args
@@ -154,7 +98,7 @@ def main(world_size, args):
     dataset = TrainDataset(input=args.input, target=args.target)
     sampler = DistributedSampler(dataset, shuffle=True)
     dataloader = DataLoader(
-        dataset, batch_size=16, num_workers=1, drop_last=True,
+        dataset, batch_size=8, num_workers=1, drop_last=True,
         prefetch_factor=2, pin_memory=True, sampler=sampler
     )
 
@@ -168,9 +112,9 @@ def main(world_size, args):
         print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] loaded " + args.out_path+"%s/checkpoint/latest.pth"%args.task)
 
     # 优化器和调度器
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 250], gamma=0.5)
+    criterion = MSESSIMLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250], gamma=0.5)
 
     # 数据记录
     # writer = SummaryWriter(args.out_path+"%s"%args.task)
@@ -199,8 +143,8 @@ def main(world_size, args):
             loss.backward()
             optimizer.step()
             
-            if rank == 0:
-                print('epoch: ' + str(epoch) + ' iter: ' + str(i_batch) +' loss: ' + str(loss.item()))
+            # if rank == 0:
+            #     print('epoch: ' + str(epoch) + ' iter: ' + str(i_batch) +' loss: ' + str(loss.item()))
             
             loss_this_time = loss_this_time + loss
             step += 1
@@ -213,14 +157,11 @@ def main(world_size, args):
             path1 = os.path.join(args.output, "checkpoint/%04d.pth"%epoch)
             torch.save(state, path1)
             shutil.copy2(path1, os.path.join(args.output, "checkpoint/latest.pth"))
-            print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: %d Step: %d || loss: %.5f || lr: %f time: %f"%(
-                epoch, step, loss.detach().cpu().numpy(), optimizer.param_groups[0]['lr'], time.time() - step_time
-            ))
 
-        scheduler.step()
-        
         if rank == 0:
-            print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch time: ", time.time()-epoch_time)    
+            print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch} | time: {(time.time() - epoch_time):.2f} | loss: {loss_this_time:.6f} | lr: {(optimizer.param_groups[0]['lr']):.6f}")    
+        
+        scheduler.step()
     
     if rank == 0:
         state = net.state_dict()
