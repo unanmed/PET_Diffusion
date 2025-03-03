@@ -66,7 +66,7 @@ def parse_arguments():
     parser.add_argument("--target", type=str, default="../mat/CT_train", help="Target images.")
     parser.add_argument("--resume", dest='resume', action='store_true',  help="Resume training. ")
     parser.add_argument("--loss", type=str, default="L2", choices=["L1", "L2"], help="Choose which loss function to use. ")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     return args
@@ -97,7 +97,7 @@ def main(world_size, args):
     dataset = TrainDataset(input=args.input, target=args.target)
     sampler = DistributedSampler(dataset, shuffle=True)
     dataloader = DataLoader(
-        dataset, batch_size=16, num_workers=1, drop_last=True,
+        dataset, batch_size=8, num_workers=1, drop_last=True,
         prefetch_factor=2, pin_memory=True, sampler=sampler
     )
 

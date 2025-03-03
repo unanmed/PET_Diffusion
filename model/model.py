@@ -42,7 +42,7 @@ class UpBlock(nn.Module):
         return self.conv(x)
 
 class PETUNet(nn.Module):
-    def __init__(self, features=[16, 32, 64, 128], in_channels=1, out_channels=1):
+    def __init__(self, features=[64, 128, 256, 512], in_channels=1, out_channels=1):
         super(PETUNet, self).__init__()
         
         # 下采样部分 (in_channels 为 1)
