@@ -72,7 +72,7 @@ class PETUNet(nn.Module):
             prev_feature = feature
         
         # 最终输出单通道 (out_channels = 1)
-        self.final_conv = nn.Conv2d(features[-1], out_channels, kernel_size=1, stride=1)
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1, stride=1)
 
     def forward(self, x):
         skips = []
@@ -93,5 +93,5 @@ class PETUNet(nn.Module):
             prev_d = d
         
         # 最后输出 (保持单通道)
-        x = self.final_conv(x)
+        x = self.final_conv(prev_d)
         return x
