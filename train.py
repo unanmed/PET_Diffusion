@@ -5,7 +5,6 @@ import shutil
 from pydicom import Dataset
 from scipy import io
 import torch
-import torch.nn as nn
 import numpy as np
 import torch.distributed as dist
 from datetime import datetime
@@ -67,7 +66,7 @@ def parse_arguments():
     parser.add_argument("--target", type=str, default="../mat/CT_train", help="Target images.")
     parser.add_argument("--resume", dest='resume', action='store_true',  help="Resume training. ")
     parser.add_argument("--loss", type=str, default="L2", choices=["L1", "L2"], help="Choose which loss function to use. ")
-    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     return args
@@ -98,7 +97,7 @@ def main(world_size, args):
     dataset = TrainDataset(input=args.input, target=args.target)
     sampler = DistributedSampler(dataset, shuffle=True)
     dataloader = DataLoader(
-        dataset, batch_size=8, num_workers=1, drop_last=True,
+        dataset, batch_size=16, num_workers=1, drop_last=True,
         prefetch_factor=2, pin_memory=True, sampler=sampler
     )
 
@@ -113,8 +112,9 @@ def main(world_size, args):
 
     # 优化器和调度器
     criterion = MSESSIMLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250], gamma=0.5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[150, 200, 250], gamma=0.4)
+    scaler = torch.amp.GradScaler("cuda")
 
     # 数据记录
     # writer = SummaryWriter(args.out_path+"%s"%args.task)
@@ -131,20 +131,18 @@ def main(world_size, args):
         net.train()
         loss_this_time = 0
         dataloader.sampler.set_epoch(epoch)
-        for i_batch, sample_batched in enumerate(dataloader):
-            step_time = time.time()
-            
+        for _, sample_batched in enumerate(dataloader):
+        
             input = sample_batched['input_img'].to(device, non_blocking=True)
             target = sample_batched['target_img'].to(device, non_blocking=True)
             
             optimizer.zero_grad()
-            output_img = model(input)
-            loss = criterion(output_img, target)
-            loss.backward()
-            optimizer.step()
-            
-            # if rank == 0:
-            #     print('epoch: ' + str(epoch) + ' iter: ' + str(i_batch) +' loss: ' + str(loss.item()))
+            with torch.amp.autocast("cuda"):
+                output_img = model(input)
+                loss = criterion(output_img, target)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             loss_this_time = loss_this_time + loss
             step += 1
@@ -167,6 +165,7 @@ def main(world_size, args):
         state = net.state_dict()
         torch.save(state, os.path.join(args.output, "checkpoint/result.pth"))
         print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Train finished.")
+        
     cleanup()
 
 if __name__ == '__main__':

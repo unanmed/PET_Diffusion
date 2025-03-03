@@ -4,15 +4,9 @@ from scipy import io
 import torch
 import numpy as np
 import cv2
-import torch.nn as nn
 from tqdm import tqdm
 from model.model import PETUNet
-
-def generate_mask(img_height, img_width, radius, center_x, center_y):
-    y, x = np.ogrid[0:img_height, 0:img_width]
-    # circle mask
-    mask = (x - center_x) ** 2 + (y - center_y) ** 2 <= radius ** 2
-    return mask
+from model.loss import MSESSIMLoss
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="training codes")
@@ -39,7 +33,7 @@ def eval(args):
     model = PETUNet()
     # 加载模型权重字典
     checkpoint = torch.load(args.model, map_location='cpu')
-    criterion = nn.L1Loss()
+    criterion = MSESSIMLoss()
     
     # 处理 state_dict，移除 'module.' 前缀
     new_state_dict = {}
