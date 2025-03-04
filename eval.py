@@ -12,7 +12,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="training codes")
     parser.add_argument("--output", type=str, default="../results/model_default", help="Path to save checkpoint.")
     parser.add_argument("--input", type=str, default="../mat/NAC_test", help="Input images.")
-    parser.add_argument("--target", type=str, default="../mat/CT_test", help="Target images.")
+    parser.add_argument("--target", type=str, default="../mat/CTAC_test", help="Target images.")
     parser.add_argument("--model", type=str, default="../models/model_default/checkpoint/latest.pth")
     args = parser.parse_args()
     return args

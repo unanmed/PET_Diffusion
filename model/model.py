@@ -5,6 +5,21 @@ from torch.utils.checkpoint import checkpoint
 def print_memory(tag=""):
     print(f"{tag} | 当前显存: {torch.cuda.memory_allocated() / 1024**2:.2f} MB, 最大显存: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
 
+class SEBlock(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # 全局平均池化
+            nn.Conv2d(in_channels, in_channels // reduction, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        attention = self.fc(x)
+        return x * attention
+
 class AttentionBlock(nn.Module):
     def __init__(self, F_g, F_l, F_int):
         super(AttentionBlock, self).__init__()
@@ -24,6 +39,10 @@ class ConvBlock(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
+            SEBlock(out_channels)
+            # nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
+            # nn.BatchNorm2d(out_channels),
+            # nn.ReLU(inplace=True),
         )
         
     def forward(self, x):
@@ -42,7 +61,7 @@ class UpBlock(nn.Module):
         return self.conv(x)
 
 class PETUNet(nn.Module):
-    def __init__(self, features=[64, 128, 256, 512], in_channels=1, out_channels=1):
+    def __init__(self, features=[32, 64, 128, 256], in_channels=1, out_channels=1):
         super(PETUNet, self).__init__()
         
         # 下采样部分 (in_channels 为 1)
@@ -64,7 +83,7 @@ class PETUNet(nn.Module):
                 UpBlock(in_channels=prev_feature, out_channels=feature)
             )
             self.attentions.append(
-                AttentionBlock(F_g=feature, F_l=feature, F_int=feature // 2)
+                SEBlock(in_channels=feature)
             )
             self.up_convs.append(
                 ConvBlock(in_channels=prev_feature, out_channels=feature)
@@ -87,9 +106,9 @@ class PETUNet(nn.Module):
         for up, attention, up_conv in zip(self.ups, self.attentions, self.up_convs):
             now_x = skips.pop()
             d = up(prev_d)
-            now_x = attention(g=d, x=now_x)
-            d = torch.cat((now_x, d), dim=1)
-            d = up_conv(d)
+            d = torch.cat((now_x, d), dim=1)  # 先拼接特征
+            d = up_conv(d)  # 再卷积
+            d = attention(d)  # 最后通过 SE Block
             prev_d = d
         
         # 最后输出 (保持单通道)

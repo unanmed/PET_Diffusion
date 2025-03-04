@@ -58,25 +58,25 @@ class TrainDataset(Dataset):
             'target_img': target_img,
         }
         return sample
-    
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="training codes")
     parser.add_argument("--output", type=str, default="../models/model_default", help="Path to save checkpoint.")
     parser.add_argument("--input", type=str, default="../mat/NAC_train", help="Input images.")
-    parser.add_argument("--target", type=str, default="../mat/CT_train", help="Target images.")
+    parser.add_argument("--target", type=str, default="../mat/CTAC_train", help="Target images.")
     parser.add_argument("--resume", dest='resume', action='store_true',  help="Resume training. ")
     parser.add_argument("--loss", type=str, default="L2", choices=["L1", "L2"], help="Choose which loss function to use. ")
     parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     return args
-    
+
 def init_status(args):
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(args.output+"/checkpoint", exist_ok=True)
     with open(args.output+"/commandline_args.yaml" , 'w') as f:
         json.dump(args.__dict__, f, indent=2)
-    
+
 def setup():
     """初始化分布式训练环境"""
     dist.init_process_group("nccl", init_method="env://")  # NCCL 后端（最快）
@@ -113,7 +113,7 @@ def main(world_size, args):
     # 优化器和调度器
     criterion = MSESSIMLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[150, 200, 250], gamma=0.4)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[50, 100, 150, 200, 250], gamma=0.5)
     scaler = torch.amp.GradScaler("cuda")
 
     # 数据记录
