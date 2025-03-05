@@ -62,11 +62,11 @@ class TrainDataset(Dataset):
 def parse_arguments():
     parser = argparse.ArgumentParser(description="training codes")
     parser.add_argument("--output", type=str, default="../models/model_default", help="Path to save checkpoint.")
-    parser.add_argument("--input", type=str, default="../mat/NAC_train", help="Input images.")
-    parser.add_argument("--target", type=str, default="../mat/CTAC_train", help="Target images.")
+    parser.add_argument("--input", type=str, default="../mat/NAC_train_diffusion", help="Input images.")
+    parser.add_argument("--target", type=str, default="../mat/CTAC_train_diffusion", help="Target images.")
     parser.add_argument("--resume", dest='resume', action='store_true',  help="Resume training. ")
     parser.add_argument("--loss", type=str, default="L2", choices=["L1", "L2"], help="Choose which loss function to use. ")
-    parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate")
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     return args
@@ -97,7 +97,7 @@ def main(world_size, args):
     dataset = TrainDataset(input=args.input, target=args.target)
     sampler = DistributedSampler(dataset, shuffle=True)
     dataloader = DataLoader(
-        dataset, batch_size=8, num_workers=1, drop_last=True,
+        dataset, batch_size=16, num_workers=1, drop_last=True,
         prefetch_factor=2, pin_memory=True, sampler=sampler
     )
 
@@ -113,7 +113,9 @@ def main(world_size, args):
     # 优化器和调度器
     criterion = MSESSIMLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[50, 100, 150, 200, 250], gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6
+    )
     scaler = torch.amp.GradScaler("cuda")
 
     # 数据记录
@@ -125,6 +127,7 @@ def main(world_size, args):
     num_batches = len(dataloader)
     
     print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Start to train")
+    # accumulation_steps = 4
 
     for epoch in range(EPOCHES):
         epoch_time = time.time()
@@ -132,17 +135,18 @@ def main(world_size, args):
         loss_this_time = 0
         dataloader.sampler.set_epoch(epoch)
         for _, sample_batched in enumerate(dataloader):
-        
+
             input = sample_batched['input_img'].to(device, non_blocking=True)
             target = sample_batched['target_img'].to(device, non_blocking=True)
             
-            optimizer.zero_grad()
             with torch.amp.autocast("cuda"):
                 output_img = model(input)
                 loss = criterion(output_img, target)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            optimizer.zero_grad()
             
             loss_this_time = loss_this_time + loss
             step += 1
@@ -159,7 +163,7 @@ def main(world_size, args):
         if rank == 0:
             print(f"[INFO {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch} | time: {(time.time() - epoch_time):.2f} | loss: {loss_this_time:.6f} | lr: {(optimizer.param_groups[0]['lr']):.6f}")    
         
-        scheduler.step()
+        scheduler.step(loss_this_time)
     
     if rank == 0:
         state = net.state_dict()
