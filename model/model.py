@@ -1,36 +1,9 @@
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
+from attention import SEBlock, AttentionBlock
 
 def print_memory(tag=""):
     print(f"{tag} | 当前显存: {torch.cuda.memory_allocated() / 1024**2:.2f} MB, 最大显存: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
-
-class SEBlock(nn.Module):
-    def __init__(self, in_channels, reduction=16):
-        super(SEBlock, self).__init__()
-        self.fc = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # 全局平均池化
-            nn.Conv2d(in_channels, in_channels // reduction, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction, in_channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        attention = self.fc(x)
-        return x * attention
-
-class AttentionBlock(nn.Module):
-    def __init__(self, F_g, F_l, F_int):
-        super(AttentionBlock, self).__init__()
-        # F_int = max(1, F_int // 4)  # 减少中间通道数
-        self.W_g = nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True)
-        self.W_x = nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True)
-        self.psi = nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True)
-
-    def forward(self, g, x):
-        psi = torch.sigmoid(self.psi(self.W_g(g) + self.W_x(x)))
-        return x * psi
     
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -39,7 +12,22 @@ class ConvBlock(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            SEBlock(out_channels)
+            # nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
+            # nn.BatchNorm2d(out_channels),
+            # nn.ReLU(inplace=True),
+        )
+        
+    def forward(self, x):
+        return self.conv(x)
+    
+class ConvBlockAttention(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            SEBlock(out_channels),
             # nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True),
             # nn.BatchNorm2d(out_channels),
             # nn.ReLU(inplace=True),
@@ -69,7 +57,7 @@ class PETUNet(nn.Module):
         
         channels_num = in_channels
         for feature in features:
-            self.downs.append(ConvBlock(channels_num, feature))
+            self.downs.append(ConvBlockAttention(channels_num, feature))
             channels_num = feature
         
         # 上采样部分
