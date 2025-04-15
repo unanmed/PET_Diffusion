@@ -11,11 +11,11 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU(),
             nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU(),
         )
         
     def forward(self, x):
@@ -26,11 +26,11 @@ class DilatedConvBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=dilation, dilation=dilation),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU(),
             nn.Conv2d(out_ch, out_ch, 3, padding=dilation, dilation=dilation),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU(),
         )
         
     def forward(self, x):
@@ -41,8 +41,8 @@ class FusionConvBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU()
         )
         
     def forward(self, x1, x2):
@@ -58,8 +58,10 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
+            nn.ELU(),
             nn.Linear(int(dim * mlp_ratio), dim),
+            nn.LayerNorm(dim),
+            nn.ELU(),
         )
 
     def forward(self, x):
@@ -109,8 +111,8 @@ class UpSampleBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU()
         )
     
     def forward(self, x):
@@ -122,13 +124,14 @@ class Decoder(nn.Module):
         self.out_ch = out_ch  # 添加out_ch属性
         self.up = nn.Sequential(
             nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
-            nn.ReLU(),
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU(),
             nn.Dropout(dropout)
         )
         self.conv = nn.Sequential(
             nn.Conv2d(out_ch * 2, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU()
+            nn.InstanceNorm2d(out_ch),
+            nn.ELU()
         )
 
     def forward(self, x, skip):
@@ -146,34 +149,37 @@ class OutConv(nn.Module):
         return self.conv(x)
     
 class BottleneckTransformer(nn.Module):
-    def __init__(self, in_ch, input_size, hidden_dim=1024):
+    def __init__(self, in_ch, hidden_dim=1024):
         super().__init__()
         self.input = nn.Sequential(
-            nn.Conv2d(in_ch, hidden_dim, 1),
-            Rearrange("b c h w -> b (h w) c")
+            nn.Conv2d(in_ch, hidden_dim, 1)
         )
         self.trans = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 hidden_dim, 
                 nhead=8, 
-                dim_feedforward=hidden_dim*2,  # 原为2倍，改为1倍
-                batch_first=True  # 使用batch_first减少permute
+                dim_feedforward=hidden_dim*2,
+                batch_first=True
             ),
-            num_layers=6  # 减少层数
+            num_layers=6
         )
         self.output = nn.Sequential(
-            Rearrange("b (h w) c -> b c h w",  h=input_size[0], w=input_size[1]),  # 使用保存的尺寸
-            nn.Conv2d(hidden_dim, in_ch, 1)
+            nn.Conv2d(hidden_dim, in_ch, 1),
+            nn.InstanceNorm2d(in_ch),
+            nn.ELU()
         )
 
     def forward(self, x):
+        B, C, H, W = x.shape
         x = self.input(x)
+        x = x.view(B, H * W, C)
         x = self.trans(x)
+        x = x.view(B, C, H, W)
         x = self.output(x)
         return x
 
 class PETUNet(nn.Module):
-    def __init__(self, base_ch=64, in_ch=1, out_ch=1, input_size=(256, 256)):
+    def __init__(self, base_ch=64, in_ch=1, out_ch=1):
         super(PETUNet, self).__init__()
         self.in_conv = ConvBlock(in_ch, base_ch)
         self.down1 = Encoder(base_ch, base_ch * 2, dropout=0.2)
@@ -181,12 +187,8 @@ class PETUNet(nn.Module):
         self.down3 = Encoder(base_ch * 4, base_ch * 8, dropout=0.2)
         self.down4 = Encoder(base_ch * 8, base_ch * 16, dropout=0.2)
 
-        H, W = input_size
-        self.bottleneck = nn.Sequential(
-            nn.Conv2d(base_ch * 16, base_ch * 16, 1),
-            BottleneckTransformer(base_ch * 16, input_size=(H//16, W//16), hidden_dim=1024),
-            nn.Conv2d(base_ch * 16, base_ch * 16, 1)
-        )
+        self.bottleneck = BottleneckTransformer(base_ch * 16, hidden_dim=1024)
+        self.fusion = ConvBlock(base_ch * 32, base_ch * 16)
 
         # 上采样层
         self.up1 = Decoder(base_ch * 16, base_ch * 8)
@@ -201,10 +203,11 @@ class PETUNet(nn.Module):
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
-        x5 = self.down4(x4)
         
         # 瓶颈层
-        x5 = self.bottleneck(x5)
+        x5_cnn = self.down4(x4)
+        x5_trans = self.bottleneck(x5_cnn)
+        x5 = self.fusion(torch.cat([x5_cnn, x5_trans], dim=1))
 
         # 解码器路径并调整通道
         x = self.up1(x5, x4)
@@ -214,139 +217,6 @@ class PETUNet(nn.Module):
         
         x = self.out_conv(x)
         return F.tanh(x)
-    
-class BiPathResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, dilation=2):
-        super().__init__()
-        self.local_path = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch//2, 3, padding=1),
-            nn.BatchNorm2d(out_ch//2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch//2, out_ch//2, 3, padding=1),
-        )
-        self.global_path = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch//2, 3, padding=dilation, dilation=dilation),
-            nn.BatchNorm2d(out_ch//2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch//2, out_ch//2, 3, padding=dilation, dilation=dilation),
-        )
-        self.fusion = nn.Sequential(
-            nn.Conv2d(out_ch, out_ch, 1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
-        )
-        self.shortcut = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        x_local = self.local_path(x)
-        x_global = self.global_path(x)
-        x_fused = torch.cat([x_local, x_global], dim=1)
-        return self.fusion(x_fused) + residual
-    
-class ENLSA(nn.Module):
-    def __init__(self, dim, num_heads=8, mlp_ratio=2):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.proj_q = nn.Linear(dim, dim)
-        self.proj_k = nn.Linear(dim, dim)
-        self.proj_v = nn.Linear(dim, dim)
-        self.proj_o = nn.Linear(dim, dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Linear(int(dim * mlp_ratio), dim)
-        )
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x_in = x.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C]
-        x_flat = x_in.view(B, -1, C)
-        
-        # 注意力计算
-        q = self.proj_q(x_flat).reshape(B, -1, self.num_heads, self.head_dim)
-        k = self.proj_k(x_flat).reshape(B, -1, self.num_heads, self.head_dim)
-        v = self.proj_v(x_flat).reshape(B, -1, self.num_heads, self.head_dim)
-        
-        attn = torch.einsum('bnhd,bmhd->bnmh', q, k) / (self.head_dim**0.5)
-        attn = attn.softmax(dim=2)
-        x = torch.einsum('bnmh,bmhd->bnhd', attn, v)
-        x = x.reshape(B, -1, C)
-        x = self.proj_o(x)
-        x = x.view(B, H, W, C).permute(0, 3, 1, 2)  # 恢复形状
-        
-        # MLP部分
-        x_mlp = x_in + x.view(B, H, W, C)
-        x_mlp = self.norm(x_mlp)
-        x_mlp = self.mlp(x_mlp).permute(0, 3, 1, 2)
-        
-        return x + x_mlp
-    
-class SpatialCrossScaleIntegrator(nn.Module):
-    def __init__(self, channels, embed_dim=256):
-        super().__init__()
-        self.proj_layers = nn.ModuleList([
-            nn.Conv2d(ch, embed_dim, 1) for ch in channels
-        ])
-        self.inv_proj_layers = nn.ModuleList([
-            nn.Conv2d(embed_dim, ch, 1) for ch in channels
-        ])
-        self.transformer = TransformerBlock(embed_dim * len(channels), num_heads=8)
-        self.embed_dim = embed_dim
-
-    def forward(self, features):
-        projected = []
-        for feat, proj in zip(features, self.proj_layers):
-            feat = F.interpolate(feat, scale_factor=2, mode='bilinear')
-            projected.append(proj(feat))
-        x = torch.cat(projected, dim=1)
-        
-        B, C, H, W = x.shape
-        x = x.view(B, C, -1).permute(0, 2, 1)
-        x = self.transformer(x)
-        x = x.permute(0, 2, 1).view(B, C, H, W)
-        
-        split_sizes = [self.embed_dim] * len(features)
-        outputs = torch.split(x, split_sizes, dim=1)
-        outputs = [inv_proj(out) for out, inv_proj in zip(outputs, self.inv_proj_layers)]
-        return [F.interpolate(out, size=feat.shape[2:]) for out, feat in zip(outputs, features)]
-    
-class PerspectivePlusUNet(nn.Module):
-    def __init__(self, base_ch=32, in_ch=1, out_ch=1):
-        super().__init__()
-        self.encoder = nn.ModuleList([
-            BiPathResidualBlock(in_ch, base_ch),
-            nn.Sequential(
-                nn.MaxPool2d(2),
-                BiPathResidualBlock(base_ch, base_ch*2),
-                ENLSA(base_ch*2)
-            ),
-            nn.Sequential(
-                nn.MaxPool2d(2),
-                BiPathResidualBlock(base_ch*2, base_ch*4),
-                ENLSA(base_ch*4)
-            )
-        ])
-        self.scsi = SpatialCrossScaleIntegrator(
-            channels=[base_ch, base_ch*2, base_ch*4]
-        )
-        self.decoder = nn.ModuleList([
-            UpSampleBlock(base_ch*4, base_ch*2),
-            UpSampleBlock(base_ch*2, base_ch),
-            nn.Conv2d(base_ch, out_ch, 1)
-        ])
-
-    def forward(self, x):
-        features = []
-        for stage in self.encoder:
-            x = stage(x)
-            features.append(x)
-        enhanced = self.scsi(features)
-        for i, layer in enumerate(self.decoder):
-            x = layer(x + enhanced[-(i+1)])
-        return x
 
 # 检查显存占用
 if __name__ == "__main__":
