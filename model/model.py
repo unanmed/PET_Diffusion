@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
 def print_memory(tag=""):
@@ -134,11 +133,8 @@ class Decoder(nn.Module):
 
     def forward(self, x, skip):
         x = self.up(x)
-        if skip is not None:
-            if x.shape[2:] != skip.shape[2:]:
-                x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
-            x = torch.cat([x, skip], dim=1)
-            x = self.conv(x)
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv(x)
         return x
     
 class OutConv(nn.Module):
@@ -158,12 +154,12 @@ class BottleneckTransformer(nn.Module):
         )
         self.trans = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-            hidden_dim, 
-            nhead=8, 
-            dim_feedforward=hidden_dim,  # 原为2倍，改为1倍
-            batch_first=True  # 使用batch_first减少permute
-         ),
-            num_layers=3  # 减少层数
+                hidden_dim, 
+                nhead=8, 
+                dim_feedforward=hidden_dim*2,  # 原为2倍，改为1倍
+                batch_first=True  # 使用batch_first减少permute
+            ),
+            num_layers=6  # 减少层数
         )
         self.output = nn.Sequential(
             Rearrange("b (h w) c -> b c h w",  h=input_size[0], w=input_size[1]),  # 使用保存的尺寸
@@ -171,14 +167,9 @@ class BottleneckTransformer(nn.Module):
         )
 
     def forward(self, x):
-        
         x = self.input(x)
-        
-        x = x.permute(1, 0, 2)
         x = self.trans(x)
-        x = x.permute(1, 0, 2)
         x = self.output(x)
-
         return x
 
 class PETUNet(nn.Module):
@@ -187,13 +178,14 @@ class PETUNet(nn.Module):
         self.in_conv = ConvBlock(in_ch, base_ch)
         self.down1 = Encoder(base_ch, base_ch * 2, dropout=0.2)
         self.down2 = Encoder(base_ch * 2, base_ch * 4, dropout=0.2)
-        self.down3 = Encoder(base_ch * 4, base_ch * 8, dropout=0.2, trans=True)
+        self.down3 = Encoder(base_ch * 4, base_ch * 8, dropout=0.2)
+        self.down4 = Encoder(base_ch * 8, base_ch * 16, dropout=0.2)
 
         H, W = input_size
         self.bottleneck = nn.Sequential(
-            nn.Conv2d(base_ch * 8, base_ch * 8, 1),
-            BottleneckTransformer(base_ch * 8, input_size=(H//8, W//8), hidden_dim=1024),
-            nn.Conv2d(base_ch * 8, base_ch * 16, 1)
+            nn.Conv2d(base_ch * 16, base_ch * 16, 1),
+            BottleneckTransformer(base_ch * 16, input_size=(H//16, W//16), hidden_dim=1024),
+            nn.Conv2d(base_ch * 16, base_ch * 16, 1)
         )
 
         # 上采样层
@@ -203,33 +195,25 @@ class PETUNet(nn.Module):
         self.up4 = Decoder(base_ch * 2, base_ch)
         self.out_conv = OutConv(base_ch, out_ch)
 
-        # 添加通道调整层
-        self.adjust_x3 = nn.Conv2d(base_ch*4, base_ch*8, 1)
-        self.adjust_x2 = nn.Conv2d(base_ch*2, base_ch*4, 1)
-        self.adjust_x1 = nn.Conv2d(base_ch, base_ch*2, 1)
-
     def forward(self, x):
         # 编码器路径
         x1 = self.in_conv(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
+        x5 = self.down4(x4)
         
         # 瓶颈层
-        x5 = self.bottleneck(x4)
+        x5 = self.bottleneck(x5)
 
         # 解码器路径并调整通道
-        x3 = self.adjust_x3(x3)
-        x = self.up1(x5, x3)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
         
-        x2 = self.adjust_x2(x2)
-        x = self.up2(x, x2)
-        
-        x1 = self.adjust_x1(x1)
-        x = self.up3(x, x1)
-        
-        x = self.up4(x, None)
-        return self.out_conv(x)
+        x = self.out_conv(x)
+        return F.tanh(x)
     
 class BiPathResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, dilation=2):

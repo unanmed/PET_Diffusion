@@ -1,8 +1,10 @@
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pytorch_msssim import ssim
 
 class MSESSIMLoss(nn.Module):
-    def __init__(self, alpha=0.8, ssim_window_size=11):
+    def __init__(self, alpha=0.5, ssim_window_size=11):
         """
         组合损失函数: MSE + SSIM
 
@@ -17,6 +19,7 @@ class MSESSIMLoss(nn.Module):
 
     def forward(self, output, target):
         # MSE 损失
+        output = (output - output.min()) / (output.max() - output.min())
         mse_loss = self.mse(output, target)
         
         # SSIM 损失 (1 - SSIM 越小越好)
